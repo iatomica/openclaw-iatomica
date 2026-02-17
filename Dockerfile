@@ -1,4 +1,4 @@
-FROM node:22-bookworm
+  FROM node:22-bookworm
 
 # Install Bun (required for build scripts)
 RUN curl -fsSL https://bun.sh/install | bash
@@ -38,7 +38,7 @@ RUN chown -R node:node /app
 # The node:22-bookworm image includes a 'node' user (uid 1000)
 # This reduces the attack surface by preventing container escape via root privileges
 USER node
-USER root
+# USER root
 
 # Start gateway server with default config.
 # Binds to loopback (127.0.0.1) by default for security.
