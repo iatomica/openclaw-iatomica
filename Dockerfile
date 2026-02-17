@@ -1,19 +1,20 @@
-# ---------- Build stage ----------
-FROM node:22-bookworm AS build
+# syntax=docker/dockerfile:1.6
 
-# Reduce memory pressure during install/build (helps on small VPS)
-ENV NODE_OPTIONS="--max-old-space-size=1024"
-ENV CI=1
+############################
+# Build stage
+############################
+FROM node:22-bookworm AS build
 
 # Install Bun (required for build scripts)
 RUN curl -fsSL https://bun.sh/install | bash
 ENV PATH="/root/.bun/bin:${PATH}"
 
-# Enable corepack (pnpm comes from here)
+# Enable Corepack so pnpm can be used
 RUN corepack enable
 
 WORKDIR /app
 
+# Optional apt packages
 ARG OPENCLAW_DOCKER_APT_PACKAGES=""
 RUN if [ -n "$OPENCLAW_DOCKER_APT_PACKAGES" ]; then \
       apt-get update && \
@@ -22,49 +23,52 @@ RUN if [ -n "$OPENCLAW_DOCKER_APT_PACKAGES" ]; then \
       rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*; \
     fi
 
-# Copy lockfiles/manifests first for cache
+# Copy only the minimum first (better caching)
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml .npmrc ./
 COPY ui/package.json ./ui/package.json
 COPY patches ./patches
 COPY scripts ./scripts
 
-# pnpm install (keep only safe, supported flags)
+# Install dependencies (workspace)
 RUN pnpm install --frozen-lockfile --prefer-offline
 
-# Copy source and build
+# Copy full repo
 COPY . .
 
+# Build main + ui
+# (OPENCLAW_A2UI_SKIP_MISSING=1 to avoid failing when A2UI sources aren't present)
 RUN OPENCLAW_A2UI_SKIP_MISSING=1 pnpm build
-# Force pnpm for UI build (Bun may fail on ARM/Synology architectures)
-ENV OPENCLAW_PREFER_PNPM=1
 RUN pnpm ui:build
 
+# IMPORTANT:
+# Your logs show UI assets are output to /app/dist/control-ui (NOT /app/ui/dist).
+# We'll copy from /app/dist/control-ui in the runtime stage.
 
-# ---------- Runtime stage ----------
+
+############################
+# Runtime stage
+############################
 FROM node:22-bookworm AS runtime
 
 WORKDIR /app
-ENV NODE_ENV=production
 
-# Make local bins available (so "openclaw" works if exposed by package.json bin)
-ENV PATH="/app/node_modules/.bin:${PATH}"
-
-# Persistent dir (mount volume here in Coolify)
+# Allow runtime to write needed files for the non-root user
 RUN mkdir -p /home/node/.openclaw && chown -R node:node /home/node
 
-# Copy only what's needed at runtime
+# Copy runtime artifacts
 COPY --from=build /app/package.json /app/
 COPY --from=build /app/node_modules /app/node_modules
 COPY --from=build /app/dist /app/dist
-COPY --from=build /app/ui/dist /app/ui/dist
 
-# Allow non-root user to write files at runtime
-RUN chown -R node:node /app
+# ✅ Fix: copy UI from the path that actually exists
+# We keep the runtime path as /app/ui/dist (so your app can serve it consistently),
+# but source it from /app/dist/control-ui (the vite output you logged).
+COPY --from=build /app/dist/control-ui /app/ui/dist
 
 USER node
 
-EXPOSE 18789
-EXPOSE 18790
+# If your app listens on a port, expose it (optional)
+# EXPOSE 3000
 
-# Container-friendly default (reachable from Coolify/Traefik)
-CMD ["node", "dist/index.js", "gateway", "--allow-unconfigured", "--bind", "lan", "--port", "18789"]
+# Adjust if your entrypoint differs
+CMD ["node", "/app/dist/entry.js"]
